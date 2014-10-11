@@ -16,11 +16,12 @@ import javax.microedition.khronos.opengles.GL10;
  */
 public class EGLImageView extends GLSurfaceView{
     private static String TAG = "EGLImageView";
-    private static Bitmap mBitmap;
+    private static Bitmap mBitmap = null;
+    static Object lock = new Object();
 
     public EGLImageView(Context context) {
         super(context);
-        init(false, 0, 0);
+        init(true, 0, 0);
     }
 
     public EGLImageView(Context context, boolean translucent, int depth, int stencil) {
@@ -242,7 +243,9 @@ public class EGLImageView extends GLSurfaceView{
 
     private static class Renderer implements GLSurfaceView.Renderer {
         public void onDrawFrame(GL10 gl) {
-            GLImageLib.draw(mBitmap);
+            synchronized (lock){
+                GLImageLib.draw(mBitmap);
+            }
         }
 
         public void onSurfaceChanged(GL10 gl, int width, int height) {
@@ -251,6 +254,12 @@ public class EGLImageView extends GLSurfaceView{
 
         public void onSurfaceCreated(GL10 gl, EGLConfig config) {
             // Do nothing.
+        }
+    }
+
+    public void setBitmap(Bitmap bmp){
+        synchronized (lock){
+            mBitmap = bmp;
         }
     }
 }

@@ -5,6 +5,7 @@
 #include <utils/Log.h>
 
 #include <EGL/egl.h>
+#include <EGL/eglext.h>
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
 
@@ -12,7 +13,9 @@
 #include <stdlib.h>
 #include <math.h>
 #include "SkBitmap.h"
+#include <ui/GraphicBuffer.h>
 
+namespace android {
 static void printGLString(const char *name, GLenum s) {
     const char *v = (const char *) glGetString(s);
     ALOGI("GL %s = %s\n", name, v);
@@ -25,15 +28,39 @@ static void checkGlError(const char* op) {
     }
 }
 
+static void checkEglError(const char* op, EGLBoolean returnVal = EGL_TRUE) {
+    if (returnVal != EGL_TRUE) {
+        ALOGI("%s() returned %d\n", op, returnVal);
+    }
+
+    for (EGLint error = eglGetError(); error != EGL_SUCCESS; error
+            = eglGetError()) {
+        ALOGI("after %s() eglError (0x%x)\n", op, error);
+    }
+}
+
 static const char gVertexShader[] = "attribute vec4 vPosition;\n"
+    "attribute vec2 aTextureCoord;\n"
+    "varying vec2 vTextureCoord;\n"
     "void main() {\n"
     "  gl_Position = vPosition;\n"
+    "  vTextureCoord = aTextureCoord;\n"
     "}\n";
-
+/*
 static const char gFragmentShader[] = "precision mediump float;\n"
     "void main() {\n"
     "  gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0);\n"
     "}\n";
+*/
+
+static const char gFragmentShader[] = "#extension GL_OES_EGL_image_external : require\n"
+    "precision mediump float;\n"
+    "uniform samplerExternalOES baseSampler;\n"
+    "varying vec2 vTextureCoord;\n"
+    "void main() {\n"
+    "  gl_FragColor = texture2D(baseSampler, vTextureCoord);\n"
+    "}\n";
+
 
 GLuint loadShader(GLenum shaderType, const char* pSource) {
     GLuint shader = glCreateShader(shaderType);
@@ -101,6 +128,38 @@ GLuint createProgram(const char* pVertexSource, const char* pFragmentSource) {
 
 GLuint gProgram;
 GLuint gvPositionHandle;
+GLuint gvTextureHandle;
+
+sp<GraphicBuffer> texBuffer;
+
+static GLuint texId = 0;
+int texWidth;
+int texHeight;
+void * vaddr = NULL;
+
+void SetupTexture(int w, int h ){
+    texWidth = w;
+    texHeight = h;
+    texBuffer = new GraphicBuffer(w, h, HAL_PIXEL_FORMAT_RGBA_8888,
+            GraphicBuffer::USAGE_HW_TEXTURE |
+                    GraphicBuffer::USAGE_SW_WRITE_RARELY);
+    EGLClientBuffer clientBuffer = (EGLClientBuffer)texBuffer->getNativeBuffer();
+    EGLImageKHR img = eglCreateImageKHR(eglGetDisplay(EGL_DEFAULT_DISPLAY), EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID,
+            clientBuffer, 0);
+    checkEglError("eglCreateImageKHR");
+    if (img == EGL_NO_IMAGE_KHR) {
+        return ;
+    }
+
+    glGenTextures(1, &texId);
+    checkGlError("glGenTextures");
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, texId);
+    checkGlError("glBindTexture");
+    glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, (GLeglImageOES)img);
+    checkGlError("glEGLImageTargetTexture2DOES");
+
+    ALOGI("setupGraphics finish(%d, %d)", w, h);
+}
 
 bool setupGraphics(int w, int h) {
     printGLString("Version", GL_VERSION);
@@ -119,21 +178,27 @@ bool setupGraphics(int w, int h) {
     ALOGI("glGetAttribLocation(\"vPosition\") = %d\n",
             gvPositionHandle);
 
+    gvTextureHandle = glGetAttribLocation(gProgram, "aTextureCoord");
+    checkGlError("glGetAttribLocation aTextureCoord");
+        ALOGI("glGetAttribLocation(\"vTextureCoord\") = %d\n",
+                gvTextureHandle);
+
     glViewport(0, 0, w, h);
     checkGlError("glViewport");
+
+    SetupTexture(w,h);
+
     return true;
 }
 
-const GLfloat gTriangleVertices[] = { 0.0f, 0.5f, -0.5f, -0.5f,
-        0.5f, -0.5f };
+const GLfloat gTriangleVertices[] = { -1.0f, 1.0f, -1.0f, -1.0f,
+        1.0f, -1.0f,1.0f, 1.0f};
 
-void renderFrame() {
-    static float grey;
-    grey += 0.01f;
-    if (grey > 1.0f) {
-        grey = 0.0f;
-    }
-    glClearColor(grey, grey, grey, 1.0f);
+const GLfloat gTriangleTexture[] = { 0.0f, 0.0f, 0.0f, 1.0f,
+        1.0f, 1.0f, 1.0f, 0.0f };
+
+void renderFrame(SkBitmap bitmap) {
+    glClearColor(0.5f, 0.5f, 0.5f, 1.0f);
     checkGlError("glClearColor");
     glClear( GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
     checkGlError("glClear");
@@ -145,22 +210,83 @@ void renderFrame() {
     checkGlError("glVertexAttribPointer");
     glEnableVertexAttribArray(gvPositionHandle);
     checkGlError("glEnableVertexAttribArray");
-    glDrawArrays(GL_TRIANGLES, 0, 3);
+
+    glVertexAttribPointer(gvTextureHandle, 2, GL_FLOAT, GL_FALSE, 0, gTriangleTexture);
+    checkGlError("glVertexAttribPointer");
+    glEnableVertexAttribArray(gvTextureHandle);
+    checkGlError("glEnableVertexAttribArray");
+
+
+    if (texBuffer != NULL) {
+        texBuffer->lock(GRALLOC_USAGE_SW_WRITE_OFTEN, &vaddr);
+        ALOGI("texBuffer->lock() ");
+                   /*char src[] = {255,255,0,255,255,0,0,255,255,0,0,255,255,255,0,255,255,0,0,255,255,0,0,255};
+                    char* dst = (char*)vaddr;
+                   for (int y = 0; y < 1080; ++y) {
+                       memcpy(dst+y*1920*4, src, 4*6);
+                   }*/
+        bitmap.lockPixels();
+        int bpp = bitmap.bytesPerPixel();
+        int w = bitmap.width();
+        int h = bitmap.height();
+         ALOGI("bitmap(w %d, h %d bpp %d ) ",w,h,bpp);
+        int wsize = w * bpp;
+        int twsize = texWidth * bpp;
+        if (texWidth > w) {
+            // glTexSubImage2D
+            char * dst = (char *)vaddr;
+            char * src = (char *)bitmap.getPixels();
+            for (int y = 0; y < h; ++y ) {
+                memcpy(dst, src, wsize);
+                dst += twsize;
+                src += wsize;
+            }
+        } else if (texWidth < w){
+           // glTexSubImage2D
+            char * dst = (char *)vaddr;
+            char * src = (char *)bitmap.getPixels();
+           for (int y = 0; y < texHeight; ++y, dst += twsize, src += wsize) {
+               memcpy(dst, src, twsize);
+           }
+        } else{
+            // glTexImage2D
+            memcpy(vaddr, bitmap.getPixels(), wsize * h);
+        }
+        bitmap.lockPixels();
+        texBuffer->unlock();
+
+    }
+
+
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
     checkGlError("glDrawArrays");
 }
 
+
 extern "C" {
+    JNIEXPORT void JNICALL Java_com_wei_collections_GLImageLib_nativeClassInit(JNIEnv * env, jobject obj);
     JNIEXPORT void JNICALL Java_com_wei_collections_GLImageLib_init(JNIEnv * env, jobject obj, jint width, jint height);
-    JNIEXPORT void JNICALL Java_com_wei_collections_GLImageLib_draw(JNIEnv * env, jobject obj, SkBitmap* bitmap);
+    JNIEXPORT void JNICALL Java_com_wei_collections_GLImageLib_draw(JNIEnv * env, jobject obj, jobject bitmap);
 };
+
+static jfieldID nativeBitmapID = 0;
+JNIEXPORT void JNICALL Java_com_wei_collections_GLImageLib_nativeClassInit(JNIEnv * env, jobject obj)
+{
+        jclass bitmapClass = env->FindClass("android/graphics/Bitmap");
+        nativeBitmapID = env->GetFieldID(bitmapClass, "mNativeBitmap", "I");
+}
 
 JNIEXPORT void JNICALL Java_com_wei_collections_GLImageLib_init(JNIEnv * env, jobject obj,  jint width, jint height)
 {
     setupGraphics(width, height);
 }
 
-JNIEXPORT void JNICALL Java_com_wei_collections_GLImageLib_draw(JNIEnv * env, jobject obj)
+JNIEXPORT void JNICALL Java_com_wei_collections_GLImageLib_draw(JNIEnv * env, jobject obj, jobject jbitmap)
 {
-    renderFrame();
+    SkBitmap const * nativeBitmap =
+            (SkBitmap const *)env->GetIntField(jbitmap, nativeBitmapID);
+    const SkBitmap& bitmap(*nativeBitmap);
+    renderFrame(bitmap);
 }
 
+}

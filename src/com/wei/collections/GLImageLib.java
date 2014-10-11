@@ -8,13 +8,15 @@ import android.graphics.Bitmap;
 public class GLImageLib {
 
     static {
-        System.loadLibrary("eglimage");
+        System.loadLibrary("glimage");
+        nativeClassInit();
     }
 
     /**
      * @param width the current view width
      * @param height the current view height
      */
+    public static native void nativeClassInit();
     public static native void init(int width, int height);
     public static native void draw(Bitmap bmp);
 }
